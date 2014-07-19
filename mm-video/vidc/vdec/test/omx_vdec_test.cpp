@@ -1,5 +1,6 @@
 /*--------------------------------------------------------------------------
 Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -8,7 +9,7 @@ modification, are permitted provided that the following conditions are met:
     * Redistributions in binary form must reproduce the above copyright
       notice, this list of conditions and the following disclaimer in the
       documentation and/or other materials provided with the distribution.
-    * Neither the name of Code Aurora nor
+    * Neither the name of The Linux Foundation nor
       the names of its contributors may be used to endorse or promote
       products derived from this software without specific prior written
       permission.
@@ -29,8 +30,6 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
     An Open max test application ....
 */
 
-#define LOG_TAG "OMX-VDEC-TEST"
-
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -45,6 +44,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <semaphore.h>
 #include "OMX_QCOMExtns.h"
 #include <sys/time.h>
+#include <cutils/properties.h>
 
 #include <linux/android_pmem.h>
 
@@ -54,6 +54,7 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 extern "C"{
 #include<utils/Log.h>
 }
+#define LOG_TAG "OMX-VDEC-TEST"
 #define DEBUG_PRINT
 #define DEBUG_PRINT_ERROR ALOGE
 
@@ -218,6 +219,7 @@ typedef enum {
 #else
   CODEC_FORMAT_MAX = CODEC_FORMAT_MPEG2
 #endif
+  CODEC_FORMAT_MAX = CODEC_FORMAT_MPEG2
 } codec_format;
 
 typedef enum {
@@ -248,6 +250,7 @@ typedef enum {
   FILE_TYPE_VP8_START_CODE = FILE_TYPE_START_OF_VP8_SPECIFIC,
   FILE_TYPE_VP8
 #endif
+  FILE_TYPE_MPEG2_START_CODE = FILE_TYPE_START_OF_MPEG2_SPECIFIC
 
 } file_type;
 
@@ -685,7 +688,6 @@ void* ebd_thread(void* pArg)
       DEBUG_PRINT_ERROR("Error - No etb pBuffer to dequeue\n");
       continue;
     }
-
     pBuffer->nOffset = 0;
     if((readBytes = Read_Buffer(pBuffer)) > 0) {
         pBuffer->nFilledLen = readBytes;
@@ -721,6 +723,13 @@ void* fbd_thread(void* pArg)
   int stride,scanlines,stride_c,i;
 #endif
   DEBUG_PRINT("First Inside %s\n", __FUNCTION__);
+  char value[PROPERTY_VALUE_MAX] = {0};
+  OMX_U32 aspectratio_prop = 0;
+  pthread_mutex_lock(&eos_lock);
+
+  DEBUG_PRINT("First Inside %s\n", __FUNCTION__);
+  property_get("vidc.vdec.debug.aspectratio", value, "0");
+  aspectratio_prop = atoi(value);
   while(currentStatus != ERROR_STATE && !bOutputEosReached)
   {
     pthread_mutex_unlock(&eos_lock);
@@ -845,6 +854,8 @@ void* fbd_thread(void* pArg)
 	  bytes_written = fwrite((const char *)pBuffer->pBuffer,
                                   pBuffer->nFilledLen,1,outputBufferFile);
 #endif
+          bytes_written = fwrite((const char *)pBuffer->pBuffer,
+                                  pBuffer->nFilledLen,1,outputBufferFile);
           if (bytes_written < 0) {
               DEBUG_PRINT("\nFillBufferDone: Failed to write to the file\n");
           }
@@ -898,6 +909,16 @@ void* fbd_thread(void* pArg)
               DEBUG_PRINT(" FrmRate(%u), AspRatioX(%u), AspRatioY(%u) ",
                 frame_info->nFrameRate, frame_info->aspectRatio.aspectRatioX,
                 frame_info->aspectRatio.aspectRatioY);
+              if (aspectratio_prop)
+                DEBUG_PRINT_ERROR(" FrmRate(%u), AspRatioX(%u), AspRatioY(%u) DispWidth(%u) DispHeight(%u)",
+                frame_info->nFrameRate, frame_info->aspectRatio.aspectRatioX,
+                frame_info->aspectRatio.aspectRatioY, frame_info->displayAspectRatio.displayHorizontalSize,
+                frame_info->displayAspectRatio.displayVerticalSize);
+              else
+                DEBUG_PRINT(" FrmRate(%u), AspRatioX(%u), AspRatioY(%u) DispWidth(%u) DispHeight(%u)",
+                frame_info->nFrameRate, frame_info->aspectRatio.aspectRatioX,
+                frame_info->aspectRatio.aspectRatioY, frame_info->displayAspectRatio.displayHorizontalSize,
+                frame_info->displayAspectRatio.displayVerticalSize);
               DEBUG_PRINT("PANSCAN numWindows(%d)", frame_info->panScan.numWindows);
               for (int i = 0; i < frame_info->panScan.numWindows; i++)
               {
@@ -927,6 +948,32 @@ void* fbd_thread(void* pArg)
               }
               DEBUG_PRINT("OMX_ExtraDataConcealMB: Buf(%p) TSmp(%lld) ConcealMB(%u)",
                 pBuffer->pBuffer, pBuffer->nTimeStamp, concealMBnum);
+            }
+            break;
+            case OMX_ExtraDataMP2ExtnData:
+            {
+              DEBUG_PRINT("\nOMX_ExtraDataMP2ExtnData");
+              OMX_U8 data = 0, *data_ptr = (OMX_U8 *)pExtra->data;
+              OMX_U32 bytes_cnt = 0;
+              while (bytes_cnt < pExtra->nDataSize)
+              {
+                DEBUG_PRINT("\n MPEG-2 Extension Data Values[%d] = 0x%x", bytes_cnt, *data_ptr);
+                data_ptr++;
+                bytes_cnt++;
+              }
+            }
+            break;
+            case OMX_ExtraDataMP2UserData:
+            {
+              DEBUG_PRINT("\nOMX_ExtraDataMP2UserData");
+              OMX_U8 data = 0, *data_ptr = (OMX_U8 *)pExtra->data;
+              OMX_U32 bytes_cnt = 0;
+              while (bytes_cnt < pExtra->nDataSize)
+              {
+                DEBUG_PRINT("\n MPEG-2 User Data Values[%d] = 0x%x", bytes_cnt, *data_ptr);
+                data_ptr++;
+                bytes_cnt++;
+              }
             }
             break;
             default:
@@ -1114,6 +1161,12 @@ OMX_ERRORTYPE EventHandler(OMX_IN OMX_HANDLETYPE hComponent,
             break;
         case OMX_EventPortSettingsChanged:
             DEBUG_PRINT("OMX_EventPortSettingsChanged port[%d]\n", nData1);
+            if (nData2 == OMX_IndexConfigCommonOutputCrop)
+            {
+                DEBUG_PRINT("Received OMX_IndexConfigCommonOutputCrop\n");
+                break;
+            }
+
             currentStatus = PORT_SETTING_CHANGE_STATE;
             if (waitForPortSettingsChanged)
             {
@@ -1361,6 +1414,13 @@ int main(int argc, char **argv)
       fflush(stdin);
       if (codec_format_option == CODEC_FORMAT_H264 && file_type_option == 3)
       {
+
+      fflush(stdin);
+      fgets(tempbuf,sizeof(tempbuf),stdin);
+      sscanf(tempbuf,"%d",&file_type_option);
+      fflush(stdin);
+      if (codec_format_option == CODEC_FORMAT_H264 && file_type_option == 3)
+      {
         printf(" Enter Nal length size [2 or 4] \n");
         fgets(tempbuf,sizeof(tempbuf),stdin);
         sscanf(tempbuf,"%d",&nalSize);
@@ -1448,9 +1508,22 @@ int main(int argc, char **argv)
       printf(" ENTER THE COLOR FORMAT \n");
       printf(" 0 --> Semiplanar \n 1 --> Tile Mode\n");
       printf(" *********************************************\n");
+      printf(" ENTER THE COLOR FORMAT \n");
+      printf(" 0 --> Semiplanar \n 1 --> Tile Mode\n");
+      printf(" *********************************************\n");
       fflush(stdin);
       fgets(tempbuf,sizeof(tempbuf),stdin);
       sscanf(tempbuf,"%d",&color_fmt_type);
+      fflush(stdin);
+
+      printf(" *********************************************\n");
+      printf(" Output picture order option: \n");
+      printf(" *********************************************\n");
+      printf(" 0 --> Display order\n 1 --> Decode order\n");
+      fflush(stdin);
+      fgets(tempbuf,sizeof(tempbuf),stdin);
+      sscanf(tempbuf,"%d",&color_fmt_type);
+      sscanf(tempbuf,"%d",&pic_order);
       fflush(stdin);
 
       printf(" *********************************************\n");
@@ -1490,6 +1563,35 @@ int main(int argc, char **argv)
           printf("Error: Unknown code %d\n", codec_format_option);
       }
     }
+    if (file_type_option >= FILE_TYPE_COMMON_CODEC_MAX)
+    {
+      switch (codec_format_option)
+      {
+        case CODEC_FORMAT_H264:
+          file_type_option = (file_type)(FILE_TYPE_START_OF_H264_SPECIFIC + file_type_option - FILE_TYPE_COMMON_CODEC_MAX);
+          break;
+        case CODEC_FORMAT_DIVX:
+          file_type_option = (file_type)(FILE_TYPE_START_OF_DIVX_SPECIFIC + file_type_option - FILE_TYPE_COMMON_CODEC_MAX);
+          break;
+        case CODEC_FORMAT_MP4:
+        case CODEC_FORMAT_H263:
+          file_type_option = (file_type)(FILE_TYPE_START_OF_MP4_SPECIFIC + file_type_option - FILE_TYPE_COMMON_CODEC_MAX);
+          break;
+        case CODEC_FORMAT_VC1:
+          file_type_option = (file_type)(FILE_TYPE_START_OF_VC1_SPECIFIC + file_type_option - FILE_TYPE_COMMON_CODEC_MAX);
+          break;
+        case CODEC_FORMAT_MPEG2:
+          file_type_option = (file_type)(FILE_TYPE_START_OF_MPEG2_SPECIFIC + file_type_option - FILE_TYPE_COMMON_CODEC_MAX);
+          break;
+        default:
+          printf("Error: Unknown code %d\n", codec_format_option);
+      }
+    }
+
+    CONFIG_VERSION_SIZE(picture_order);
+    picture_order.eOutputPictureOrder = QOMX_VIDEO_DISPLAY_ORDER;
+    if (pic_order == 1)
+      picture_order.eOutputPictureOrder = QOMX_VIDEO_DECODE_ORDER;
 
     CONFIG_VERSION_SIZE(picture_order);
     picture_order.eOutputPictureOrder = QOMX_VIDEO_DISPLAY_ORDER;
@@ -1867,6 +1969,24 @@ int Init_Decoder()
     {
       strlcpy(vdecCompNames, "OMX.qcom.video.decoder.divx311", 31);
     }
+    }
+    else if (codec_format_option == CODEC_FORMAT_MPEG2)
+    {
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.mpeg2", 29);
+    }
+    else if (file_type_option == FILE_TYPE_RCV)
+    {
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.wmv", 27);
+    }
+    else if (file_type_option == FILE_TYPE_DIVX_4_5_6)
+    {
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.divx", 28);
+    }
+#ifdef MAX_RES_1080P
+    else if (file_type_option == FILE_TYPE_DIVX_311)
+    {
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.divx311", 31);
+    }
 #endif
     else
     {
@@ -2038,6 +2158,18 @@ int Play_Decoder()
     OMX_SetParameter(dec_handle,(OMX_INDEXTYPE)OMX_QcomIndexParamConcealMBMapExtraData,
                      (OMX_PTR)&extra_data);
 #endif
+#if 0
+    extra_data.bEnable = OMX_TRUE;
+    OMX_SetParameter(dec_handle,(OMX_INDEXTYPE)OMX_QcomIndexEnableExtnUserData,
+                     (OMX_PTR)&extra_data);
+#endif
+#if 0
+    QOMX_ENABLETYPE enable;
+    enable.bEnable = OMX_TRUE;
+    OMX_SetConfig(dec_handle,(OMX_INDEXTYPE)OMX_QcomIndexConfigTurboMode,
+                     (OMX_PTR)&enable);
+#endif
+
     /* Query the decoder outport's min buf requirements */
     CONFIG_VERSION_SIZE(portFmt);
 
@@ -2095,6 +2227,7 @@ int Play_Decoder()
            QOMX_COLOR_FormatYUV420PackedSemiPlanar64x32Tile2m8ka;
     }
 #elif _MSM8974_
+#elif _COPPER_
         color_fmt = OMX_COLOR_FormatYUV420SemiPlanar;
 #else
        color_fmt = (OMX_COLOR_FORMATTYPE)
@@ -2641,6 +2774,14 @@ static void do_freeHandle_and_clean_up(bool isDueToError)
     OMX_STATETYPE state = OMX_StateInvalid;
     OMX_GetState(dec_handle, &state);
     if (state == OMX_StateExecuting || state == OMX_StatePause)
+    {
+      DEBUG_PRINT("Requesting transition to Idle");
+      OMX_SendCommand(dec_handle, OMX_CommandStateSet, OMX_StateIdle, 0);
+      wait_for_event();
+    }
+    OMX_GetState(dec_handle, &state);
+    if (state == OMX_StateIdle)
+    {
     {
       DEBUG_PRINT("Requesting transition to Idle");
       OMX_SendCommand(dec_handle, OMX_CommandStateSet, OMX_StateIdle, 0);
@@ -3583,6 +3724,7 @@ static int Read_Buffer_From_VP8_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
 	return n_offset;
 }
 #endif
+
 static int open_video_file ()
 {
     int error_code = 0;
@@ -3790,6 +3932,8 @@ int overlay_fb(struct OMX_BUFFERHEADERTYPE *pBufHdr)
     if (ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo) < 0)
     {
         printf("ERROR: FBIOPAN_DISPLAY failed! line=%d\n", __LINE__);
+    if (ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo) < 0) {
+        DEBUG_PRINT_ERROR("FBIOPAN_DISPLAY failed! line=%d\n", __LINE__);
         return -1;
     }
     DEBUG_PRINT("\nMSMFB_OVERLAY_PLAY successfull");
@@ -3801,6 +3945,9 @@ void overlay_unset()
     if (ioctl(fb_fd, MSMFB_OVERLAY_UNSET, &vid_buf_front_id))
     {
         printf("\nERROR! MSMFB_OVERLAY_UNSET failed! (Line %d)\n", __LINE__);
+    }
+    if (ioctl(fb_fd, FBIOPAN_DISPLAY, &vinfo) < 0) {
+        DEBUG_PRINT_ERROR("FBIOPAN_DISPLAY failed! line=%d\n", __LINE__);
     }
 }
 

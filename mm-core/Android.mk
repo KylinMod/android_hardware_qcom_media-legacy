@@ -11,6 +11,12 @@ OMXCORE_CFLAGS += -U_ENABLE_QC_MSG_LOG_
 #===============================================================================
 
 ifeq ($(TARGET_BOARD_PLATFORM),msm7x27a)
+
+#===============================================================================
+#             Figure out the targets
+#===============================================================================
+
+ifeq ($(TARGET_BOARD_PLATFORM),msm7627a)
 MM_CORE_TARGET = 7627A
 else ifeq ($(TARGET_BOARD_PLATFORM),msm7x30)
 MM_CORE_TARGET = 7630
@@ -56,6 +62,8 @@ LOCAL_COPY_HEADERS      += inc/QOMX_VideoExtensions.h
 LOCAL_COPY_HEADERS      += inc/OMX_IndexExt.h
 LOCAL_COPY_HEADERS      += inc/QOMX_StreamingExtensions.h
 
+LOCAL_COPY_HEADERS      += inc/QCMediaDefs.h
+LOCAL_COPY_HEADERS      += inc/QCMetaData.h
 
 #===============================================================================
 #             LIBRARY for Android apps

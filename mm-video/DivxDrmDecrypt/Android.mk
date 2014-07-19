@@ -3,10 +3,12 @@ include $(CLEAR_VARS)
 
 #===============================================================================
 #            Deploy the headers that can be exposed
+#             Deploy the headers that can be exposed
 #===============================================================================
 
 LOCAL_COPY_HEADERS_TO   := mm-video/DivxDrmDecrypt
 LOCAL_COPY_HEADERS      := inc/DivXDrmDecrypt.h
+
 
 LOCAL_CFLAGS := \
     -D_ANDROID_

@@ -1,5 +1,6 @@
 /*--------------------------------------------------------------------------
 Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2012, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -9,6 +10,7 @@ modification, are permitted provided that the following conditions are met:
       notice, this list of conditions and the following disclaimer in the
       documentation and/or other materials provided with the distribution.
     * Neither the name of Code Aurora nor
+    * Neither the name of The Linux Foundation nor
       the names of its contributors may be used to endorse or promote
       products derived from this software without specific prior written
       permission.
@@ -233,6 +235,7 @@ OMX_S32 extra_data_handler::parse_sliceinfo(
   OMX_U32 *data = (OMX_U32 *)pExtra->data;
   OMX_U32 num_slices = *data;
   DEBUG_PRINT_HIGH("number of slices = %d", num_slices);
+  DEBUG_PRINT_LOW("number of slices = %d", num_slices);
   if ((4 + num_slices * 8) != (OMX_U32)pExtra->nDataSize) {
     DEBUG_PRINT_ERROR("unknown error in slice info extradata");
     return -1;
@@ -256,6 +259,7 @@ OMX_S32 extra_data_handler::parse_sliceinfo(
     slice_size = (OMX_U32)(*(data + (i*2 + 2)));
     total_size += slice_size;
     DEBUG_PRINT_HIGH("slice number %d offset/size = %d/%d",
+    DEBUG_PRINT_LOW("slice number %d offset/size = %d/%d",
         i, slice_offset, slice_size);
   }
   if (pBufHdr->nFilledLen != total_size) {
@@ -267,6 +271,8 @@ OMX_S32 extra_data_handler::parse_sliceinfo(
 }
 
 OMX_U32 extra_data_handler::parse_extra_data(OMX_BUFFERHEADERTYPE *buf_hdr)
+OMX_U32 extra_data_handler::parse_extra_data(
+    OMX_BUFFERHEADERTYPE *buf_hdr, OMX_U32 extradata_offset)
 {
   OMX_OTHER_EXTRADATATYPE *extra_data = (OMX_OTHER_EXTRADATATYPE *)
     ((unsigned)(buf_hdr->pBuffer + buf_hdr->nOffset +
@@ -278,6 +284,28 @@ OMX_U32 extra_data_handler::parse_extra_data(OMX_BUFFERHEADERTYPE *buf_hdr)
     while(extra_data && (OMX_U8*)extra_data < (buf_hdr->pBuffer +
       buf_hdr->nAllocLen) && extra_data->eType != VDEC_EXTRADATA_NONE) {
       DEBUG_PRINT_LOW("\nExtra data type(%x) Extra data size(%u)",
+  DEBUG_PRINT_LOW("parse_extra_data: flags = 0x%x, extradata_offset = %d",
+      buf_hdr->nFlags, extradata_offset);
+  if (buf_hdr->nFlags & OMX_BUFFERFLAG_EXTRADATA) {
+    if (extradata_offset > buf_hdr->nFilledLen) {
+      OMX_U32 qfiller_size;
+      qfiller_size = (OMX_U32)((buf_hdr->pBuffer +
+         extradata_offset) - (OMX_U8 *) extra_data);
+      extra_data->nSize = qfiller_size;
+      extra_data->nVersion.nVersion = OMX_SPEC_VERSION;
+      extra_data->nPortIndex = 0x1;
+      extra_data->eType = (OMX_EXTRADATATYPE)VEN_EXTRADATA_QCOMFILLER;
+      extra_data->nDataSize = qfiller_size - 20;
+      DEBUG_PRINT_LOW("Insert Qcom filler of size %d", qfiller_size);
+    } else {
+      buf_hdr->nFlags &= ~OMX_BUFFERFLAG_EXTRADATA;
+      DEBUG_PRINT_ERROR("extradata_offset[%d] is less than nFilledLen[%d]",
+         extradata_offset, buf_hdr->nFilledLen);
+      extra_data = NULL;
+    }
+    while(extra_data && (OMX_U8*)extra_data < (buf_hdr->pBuffer +
+      buf_hdr->nAllocLen) && extra_data->eType != VDEC_EXTRADATA_NONE) {
+      DEBUG_PRINT_LOW("Extra data type(%x) Extra data size(%u)",
         extra_data->eType, extra_data->nDataSize);
       if (extra_data->eType == VDEC_EXTRADATA_SEI) {
          parse_sei(extra_data->data, extra_data->nDataSize);
@@ -290,6 +318,17 @@ OMX_U32 extra_data_handler::parse_extra_data(OMX_BUFFERHEADERTYPE *buf_hdr)
          DEBUG_PRINT_HIGH("Extradata SliceInfo of size %d found, "
             "parsing it", extra_data->nDataSize);
          parse_sliceinfo(buf_hdr, extra_data);
+         DEBUG_PRINT_LOW("Extradata Qcom Filler found, skip %d bytes",
+            extra_data->nSize);
+      }
+      else if (extra_data->eType == VEN_EXTRADATA_SLICEINFO) {
+         DEBUG_PRINT_LOW("Extradata SliceInfo of size %d found, "
+            "parsing it", extra_data->nDataSize);
+         parse_sliceinfo(buf_hdr, extra_data);
+      } else {
+         DEBUG_PRINT_ERROR("Unknown extradata found");
+         buf_hdr->nFlags &= ~OMX_BUFFERFLAG_EXTRADATA;
+         break;
       }
       extra_data = (OMX_OTHER_EXTRADATATYPE *) (((OMX_U8 *) extra_data) +
         extra_data->nSize);
@@ -433,6 +472,8 @@ OMX_U32 extra_data_handler::create_sei(OMX_U8 *buffer)
    if(sei_payload_type == SEI_PAYLOAD_FRAME_PACKING_ARRANGEMENT) {
      create_frame_pack();
 
+     DEBUG_PRINT_LOW("create extra data with config");
+     create_frame_pack();
      if(bit_ptr != 8) {
        e_u(1,1);
        if(bit_ptr != 8)
@@ -465,6 +506,7 @@ OMX_U32 extra_data_handler::create_extra_data(OMX_BUFFERHEADERTYPE *buf_hdr)
     if(buf_hdr->nFlags & OMX_BUFFERFLAG_CODECCONFIG) {
       DEBUG_PRINT_LOW("\n%s:%d create extra data with config", __func__,
         __LINE__);
+    if(buf_hdr->nFlags & OMX_BUFFERFLAG_CODECCONFIG) {
       if(pack_sei) {
          msg_size = create_sei(buffer);
 	 if( msg_size > 0)

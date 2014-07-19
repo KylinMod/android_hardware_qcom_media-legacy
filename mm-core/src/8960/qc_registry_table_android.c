@@ -1,5 +1,6 @@
 /*--------------------------------------------------------------------------
 Copyright (c) 2011, Code Aurora Forum. All rights reserved.
+Copyright (c) 2011-2013, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are
@@ -11,6 +12,7 @@ met:
       disclaimer in the documentation and/or other materials provided
       with the distribution.
     * Neither the name of Code Aurora Forum, Inc. nor the names of its
+    * Neither the name of The Linux Foundation nor the names of its
       contributors may be used to endorse or promote products derived
       from this software without specific prior written permission.
 
@@ -153,6 +155,22 @@ omx_core_cb_type core[] =
     }
   },
   {
+    "OMX.qcom.video.decoder.mpeg2.secure",
+    NULL, // Create instance function
+    // Unique instance handle
+    {
+      NULL,
+      NULL,
+      NULL,
+      NULL
+    },
+    NULL,   // Shared object library handle
+    "libOmxVdec.so",
+    {
+      "video_decoder.mpeg2"
+    }
+  },
+  {
     "OMX.qcom.video.decoder.vc1",
     NULL, // Create instance function
     // Unique instance handle
@@ -249,6 +267,22 @@ omx_core_cb_type core[] =
     }
   },
   {
+    "OMX.qcom.video.encoder.avc.secure",
+    NULL, // Create instance function
+    // Unique instance handle
+    {
+      NULL,
+      NULL,
+      NULL,
+      NULL
+    },
+    NULL,   // Shared object library handle
+    "libOmxVenc.so",
+    {
+      "video_encoder.avc"
+    }
+  },
+  {
     "OMX.qcom.audio.decoder.Qcelp13",
     NULL, // Create instance function
     // Unique instance handle
@@ -310,6 +344,38 @@ omx_core_cb_type core[] =
     "libOmxWmaDec.so",
     {
      "audio_decoder.wma"
+    }
+  },
+  {
+    "OMX.qcom.audio.decoder.wmaLossLess",
+    NULL,   // Create instance function
+    // Unique instance handle
+    {
+     NULL,
+     NULL,
+     NULL,
+     NULL
+    },
+    NULL,   // Shared object library handle
+    "libOmxWmaDec.so",
+    {
+     "audio_decoder.wma"
+    }
+  },
+  {
+    "OMX.qcom.audio.decoder.amrwbplus",
+    NULL,   // Create instance function
+    // Unique instance handle
+    {
+     NULL,
+     NULL,
+     NULL,
+     NULL
+    },
+    NULL,   // Shared object library handle
+    "libOmxAmrwbplusDec.so",
+    {
+     "audio_decoder.awbplus"
     }
   },
   {
@@ -409,6 +475,7 @@ omx_core_cb_type core[] =
     }
   },
  {
+  {
     "OMX.qcom.audio.decoder.multiaac",
     NULL,   // Create instance function
     // Unique instance handle

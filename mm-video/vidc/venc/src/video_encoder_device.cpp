@@ -1,5 +1,6 @@
 /*--------------------------------------------------------------------------
 Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2013, The Linux Foundation. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -8,7 +9,7 @@ modification, are permitted provided that the following conditions are met:
     * Redistributions in binary form must reproduce the above copyright
       notice, this list of conditions and the following disclaimer in the
       documentation and/or other materials provided with the distribution.
-    * Neither the name of Code Aurora nor
+    * Neither the name of The Linux Foundation nor
       the names of its contributors may be used to endorse or promote
       products derived from this software without specific prior written
       permission.
@@ -29,12 +30,19 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <unistd.h>
+#include<unistd.h>
 #include <fcntl.h>
 #include "video_encoder_device.h"
 #include "omx_video_encoder.h"
 #include <linux/android_pmem.h>
 #ifdef USE_ION
 #include <linux/ion.h>
+#include <media/hardware/HardwareAPI.h>
+#ifdef USE_ION
+#include <linux/msm_ion.h>
+#endif
+#ifdef _ANDROID_
+#include <cutils/properties.h>
 #endif
 
 #define MPEG4_SP_START 0
@@ -149,6 +157,23 @@ venc_dev::venc_dev(class omx_venc *venc_class)
   m_eProfile = 0;
   pthread_mutex_init(&loaded_start_stop_mlock, NULL);
   pthread_cond_init (&loaded_start_stop_cond, NULL);
+  m_use_uncache_buffers = false;
+  pthread_mutex_init(&loaded_start_stop_mlock, NULL);
+  pthread_cond_init (&loaded_start_stop_cond, NULL);
+  venc_encoder = reinterpret_cast<omx_venc*>(venc_class);
+
+#ifdef _ANDROID_
+  /* by default cache buffers enabled, to */
+  /* use uncache buffers, set below command */
+  /* setprop persist.camera.mem.usecache 0 */
+  char cache_value[PROPERTY_VALUE_MAX] = {0};
+  property_get("persist.camera.mem.usecache", cache_value, "1");
+  if (!atoi(cache_value))
+  {
+    m_use_uncache_buffers = true;
+    DEBUG_PRINT_HIGH("persist.camera.mem.usecache value is %d", atoi(cache_value));
+  }
+#endif
   DEBUG_PRINT_LOW("venc_dev constructor");
 }
 
@@ -200,12 +225,16 @@ bool venc_dev::venc_open(OMX_U32 codec)
   struct venc_ioctl_msg ioctl_msg = {NULL,NULL};
   int r;
   unsigned int   alignment = 0,buffer_size = 0, temp =0;
-
-  m_nDriver_fd = open ("/dev/msm_vidc_enc",O_RDWR|O_NONBLOCK);
+  OMX_STRING device_name = "/dev/msm_vidc_enc";
+  DEBUG_PRINT_ERROR("\n Is component secure %d",
+                  venc_encoder->is_secure_session());
+  if(venc_encoder->is_secure_session())
+    device_name = "/dev/msm_vidc_enc_sec";
+  m_nDriver_fd = open (device_name,O_RDWR|O_NONBLOCK);
   if(m_nDriver_fd == 0)
   {
     DEBUG_PRINT_ERROR("ERROR: Got fd as 0 for msm_vidc_enc, Opening again\n");
-    m_nDriver_fd = open ("/dev/msm_vidc_enc",O_RDWR|O_NONBLOCK);
+    m_nDriver_fd = open (device_name,O_RDWR|O_NONBLOCK);
   }
 
   if((int)m_nDriver_fd < 0)
@@ -243,6 +272,13 @@ bool venc_dev::venc_open(OMX_U32 codec)
 #else
   m_sVenc_cfg.inputformat= VEN_INPUTFMT_NV12;
 #endif
+// initializing QP range parameters
+  qp_range.minqp = 2;
+  if(codec == OMX_VIDEO_CodingAVC)
+    qp_range.maxqp = 51;
+  else
+    qp_range.maxqp = 31;
+
   if(codec == OMX_VIDEO_CodingMPEG4)
   {
     m_sVenc_cfg.codectype = VEN_CODEC_MPEG4;
@@ -539,6 +575,19 @@ bool venc_dev::venc_get_buf_req(unsigned long *min_buff_count,
 
   return true;
 
+}
+
+bool venc_dev::venc_get_curr_perf_lvl(OMX_PTR curr_perf)
+{
+    struct vdec_ioctl_msg ioctl_msg = {NULL,NULL};
+    ioctl_msg.out = (void*)curr_perf;
+    if (ioctl(m_nDriver_fd, VEN_IOCTL_GET_PERF_LEVEL, &ioctl_msg) < 0)
+    {
+      DEBUG_PRINT_ERROR("ioctl VENC_IOCTL_GET_CURR_PERF_LVL failed");
+      return false;
+    }
+    DEBUG_PRINT_HIGH("get_curr_perf_lvl = %u", *(OMX_U32 *)(curr_perf));
+    return true;
 }
 
 bool venc_dev::venc_set_param(void *paramData,OMX_INDEXTYPE index )
@@ -962,6 +1011,40 @@ bool venc_dev::venc_set_param(void *paramData,OMX_INDEXTYPE index )
       }
       break;
     }
+
+  case OMX_QcomIndexParamVideoQPRange:
+    {
+      DEBUG_PRINT_LOW("venc_set_param:OMX_QcomIndexParamVideoQPRange\n");
+      OMX_QCOM_VIDEO_PARAM_QPRANGETYPE *qp_range =
+        (OMX_QCOM_VIDEO_PARAM_QPRANGETYPE *)paramData;
+      if(qp_range->nPortIndex == (OMX_U32) PORT_INDEX_OUT)
+      {
+        if(venc_set_qp_range (qp_range->minQP,
+                                qp_range->maxQP) == false)
+        {
+          DEBUG_PRINT_ERROR("\nERROR: Setting QP Range failed");
+          return false;
+        }
+      }
+      else
+      {
+        DEBUG_PRINT_ERROR("\nERROR: Invalid Port Index for OMX_QcomIndexParamVideoQPRange");
+      }
+      break;
+    }
+
+  case OMX_ExtraDataVideoEncoderSliceInfo:
+    {
+      DEBUG_PRINT_LOW("venc_set_param: OMX_ExtraDataVideoEncoderSliceInfo");
+      OMX_U32 extra_data = *(OMX_U32 *)paramData;
+      if(venc_set_extradata(extra_data) == false)
+      {
+         DEBUG_PRINT_ERROR("ERROR: Setting "
+            "OMX_QcomIndexParamIndexExtraDataType failed");
+         return false;
+      }
+      break;
+    }
   case OMX_QcomIndexEnableSliceDeliveryMode:
     {
        QOMX_EXTNINDEX_PARAMTYPE* pParam =
@@ -979,6 +1062,30 @@ bool venc_dev::venc_set_param(void *paramData,OMX_INDEXTYPE index )
          DEBUG_PRINT_ERROR("OMX_QcomIndexEnableSliceDeliveryMode "
             "called on wrong port(%d)", pParam->nPortIndex);
          return OMX_ErrorBadPortIndex;
+       }
+       break;
+    }
+  case OMX_QcomIndexParamSequenceHeaderWithIDR:
+    {
+       PrependSPSPPSToIDRFramesParams * pParam =
+          (PrependSPSPPSToIDRFramesParams *)paramData;
+
+       if(venc_set_inband_video_header(pParam->bEnable) == false)
+       {
+         DEBUG_PRINT_ERROR("Setting inband sps/pps failed");
+         return false;
+       }
+       break;
+    }
+  case OMX_QcomIndexParamEnableVUIStreamRestrictFlag:
+    {
+       QOMX_VUI_BITSTREAM_RESTRICT *pParam =
+          (QOMX_VUI_BITSTREAM_RESTRICT *)paramData;
+
+       if(venc_set_bitstream_restrict_in_vui(pParam->bEnable) == false)
+       {
+         DEBUG_PRINT_ERROR("Setting bitstream_restrict flag in VUI failed");
+         return false;
        }
        break;
     }
@@ -1226,6 +1333,7 @@ OMX_U32 venc_dev::pmem_allocate(OMX_U32 size, OMX_U32 alignment, OMX_U32 count)
 
 #ifdef USE_ION
   recon_buff[count].ion_device_fd = open (MEM_DEVICE,O_RDONLY);
+  recon_buff[count].ion_device_fd = open (MEM_DEVICE,O_RDONLY | O_DSYNC);
   if(recon_buff[count].ion_device_fd < 0)
   {
       DEBUG_PRINT_ERROR("\nERROR: ION Device open() Failed");
@@ -1238,6 +1346,14 @@ OMX_U32 venc_dev::pmem_allocate(OMX_U32 size, OMX_U32 alignment, OMX_U32 count)
 #else
   recon_buff[count].alloc_data.flags = (ION_HEAP(MEM_HEAP_ID) |
                                         ION_HEAP(ION_IOMMU_HEAP_ID));
+  recon_buff[count].alloc_data.flags = 0;
+  recon_buff[count].alloc_data.len = size;
+#ifdef MAX_RES_720P
+  recon_buff[count].alloc_data.heap_mask = ION_HEAP(MEM_HEAP_ID);
+#else
+  recon_buff[count].alloc_data.heap_mask = (ION_HEAP(MEM_HEAP_ID) |
+                  (venc_encoder->is_secure_session() ? ION_SECURE
+                   : ION_HEAP(ION_IOMMU_HEAP_ID)));
 #endif
   recon_buff[count].alloc_data.align = clip2(alignment);
   if (recon_buff[count].alloc_data.align != 8192)
@@ -1302,6 +1418,28 @@ OMX_U32 venc_dev::pmem_allocate(OMX_U32 size, OMX_U32 alignment, OMX_U32 count)
     recon_buff[count].ion_device_fd =-1;
 #endif
     return -1;
+  if(!venc_encoder->is_secure_session()) {
+    buf_addr = mmap(NULL, size,
+                 PROT_READ | PROT_WRITE,
+                 MAP_SHARED, pmem_fd, 0);
+
+    if (buf_addr == (void*) MAP_FAILED)
+    {
+      close(pmem_fd);
+      pmem_fd = -1;
+      DEBUG_PRINT_ERROR("Error returned in allocating recon buffers buf_addr: %p\n",buf_addr);
+  #ifdef USE_ION
+      if(ioctl(recon_buff[count].ion_device_fd,ION_IOC_FREE,
+         &recon_buff[count].alloc_data.handle)) {
+        DEBUG_PRINT_LOW("ion recon buffer free failed");
+      }
+      recon_buff[count].alloc_data.handle = NULL;
+      recon_buff[count].ion_alloc_fd.fd =-1;
+      close(recon_buff[count].ion_device_fd);
+      recon_buff[count].ion_device_fd =-1;
+  #endif
+      return -1;
+    }
   }
 
   DEBUG_PRINT_HIGH("\n Allocated virt:%p, FD: %d of size %d \n", buf_addr, pmem_fd, size);
@@ -1310,6 +1448,10 @@ OMX_U32 venc_dev::pmem_allocate(OMX_U32 size, OMX_U32 alignment, OMX_U32 count)
   recon_addr.pmem_fd = pmem_fd;
   recon_addr.offset = 0;
   recon_addr.pbuffer = (unsigned char *)buf_addr;
+  if(!venc_encoder->is_secure_session())
+    recon_addr.pbuffer = (unsigned char *)buf_addr;
+  else
+    recon_addr.pbuffer = (unsigned char *)(pmem_fd + 1);
 
   ioctl_msg.in = (void*)&recon_addr;
   ioctl_msg.out = NULL;
@@ -1348,6 +1490,8 @@ OMX_U32 venc_dev::pmem_free()
       if(ioctl(m_nDriver_fd, VEN_IOCTL_FREE_RECON_BUFFER ,&ioctl_msg) < 0)
         DEBUG_PRINT_ERROR("VEN_IOCTL_FREE_RECON_BUFFER failed");
       munmap(recon_buff[cnt].virtual_address, recon_buff[cnt].size);
+      if(!venc_encoder->is_secure_session())
+        munmap(recon_buff[cnt].virtual_address, recon_buff[cnt].size);
       close(recon_buff[cnt].pmem_fd);
 #ifdef USE_ION
       if(ioctl(recon_buff[cnt].ion_device_fd,ION_IOC_FREE,
@@ -1386,6 +1530,9 @@ void venc_dev::venc_config_print()
 
   DEBUG_PRINT_HIGH("\nENC_CONFIG: qpI: %d, qpP: %d, qpb: 0",
                    session_qp.iframeqp, session_qp.pframqp);
+
+  DEBUG_PRINT_HIGH("\nENC_CONFIG: minQP: %d, maxQP: %d",
+                   qp_range.minqp, qp_range.maxqp);
 
   DEBUG_PRINT_HIGH("\nENC_CONFIG: VOP_Resolution: %d, Slice-Mode: %d, Slize_Size: %d",
                    voptimecfg.voptime_resolution, multislice.mslice_mode,
@@ -1438,6 +1585,7 @@ bool venc_dev::venc_use_buf(void *buf_addr, unsigned port,unsigned)
   struct venc_ioctl_msg ioctl_msg = {NULL,NULL};
   struct pmem *pmem_tmp;
   struct venc_bufferpayload dev_buffer = {0};
+  struct venc_allocatorproperty buff_alloc_property = {0};
 
   pmem_tmp = (struct pmem *)buf_addr;
 
@@ -1468,6 +1616,30 @@ bool venc_dev::venc_use_buf(void *buf_addr, unsigned port,unsigned)
       dev_buffer.sz =  luma_size_2k + luma_size/2;
       dev_buffer.maped_size = dev_buffer.sz;
     }
+      dev_buffer.sz = luma_size_2k + ((luma_size/2 + 2047) & ~2047);
+#ifdef USE_ION
+      ioctl_msg.in = NULL;
+      ioctl_msg.out = (void*)&buff_alloc_property;
+      if(ioctl (m_nDriver_fd,VEN_IOCTL_GET_INPUT_BUFFER_REQ,(void*)&ioctl_msg) < 0)
+      {
+         DEBUG_PRINT_ERROR("\nERROR: venc_use_buf:get input buffer failed ");
+         return false;
+      }
+      if(buff_alloc_property.alignment < 4096)
+      {
+         dev_buffer.sz = ((dev_buffer.sz + 4095) & ~4095);
+      }
+      else
+      {
+         dev_buffer.sz = ((dev_buffer.sz + (buff_alloc_property.alignment - 1)) &
+                                           ~(buff_alloc_property.alignment - 1));
+      }
+#endif
+      dev_buffer.maped_size = dev_buffer.sz;
+    }
+
+    ioctl_msg.in  = (void*)&dev_buffer;
+    ioctl_msg.out = NULL;
 
     DEBUG_PRINT_LOW("\n venc_use_buf:pbuffer = %x,fd = %x, offset = %d, maped_size = %d", \
                 dev_buffer.pbuffer, \
@@ -1589,16 +1761,12 @@ bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf,unsigned,unsigne
   }
   bufhdr = (OMX_BUFFERHEADERTYPE *)buffer;
 
-  DEBUG_PRINT_LOW("\n Input buffer length %d",bufhdr->nFilledLen);
-
   if(pmem_data_buf)
   {
-    DEBUG_PRINT_LOW("\n Internal PMEM addr for i/p Heap UseBuf: %p", pmem_data_buf);
     frameinfo.ptrbuffer = (OMX_U8 *)pmem_data_buf;
   }
   else
   {
-    DEBUG_PRINT_LOW("\n Shared PMEM addr for i/p PMEM UseBuf/AllocateBuf: %p", bufhdr->pBuffer);
     frameinfo.ptrbuffer = (OMX_U8 *)bufhdr->pBuffer;
   }
 
@@ -1612,8 +1780,10 @@ bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf,unsigned,unsigne
   ioctl_msg.in = &frameinfo;
   ioctl_msg.out = NULL;
 
-  DEBUG_PRINT_LOW("DBG: i/p frameinfo: bufhdr->pBuffer = %p, ptrbuffer = %p, offset = %u, len = %u",
-      bufhdr->pBuffer, frameinfo.ptrbuffer, frameinfo.offset, frameinfo.len);
+  DEBUG_PRINT_LOW("i/p frameinfo: pBuffer = 0x%x, ptrbuffer = 0x%x, nFilledlen = %d, "
+      "Ts = %lld, nFlags = 0x%x, nOffset = %d", bufhdr->pBuffer,
+      frameinfo.ptrbuffer, frameinfo.len, frameinfo.timestamp,
+      frameinfo.flags, frameinfo.offset);
   if(ioctl(m_nDriver_fd,VEN_IOCTL_CMD_ENCODE_FRAME,&ioctl_msg) < 0)
   {
     /*Generate an async error and move to invalid state*/
@@ -1621,6 +1791,43 @@ bool venc_dev::venc_empty_buf(void *buffer, void *pmem_data_buf,unsigned,unsigne
   }
 #ifdef INPUT_BUFFER_LOG
 #ifdef MAX_RES_1080P
+
+  int y_size = 0;
+  int c_offset = 0;
+  unsigned char *buf_addr = NULL;
+
+  y_size = m_sVenc_cfg.input_width * m_sVenc_cfg.input_height;
+  //chroma offset is y_size aligned to the 2k boundary
+  c_offset= (y_size + 2047) & (~(2047));
+
+  if(pmem_data_buf)
+  {
+    DEBUG_PRINT_LOW("\n Internal PMEM addr for i/p Heap UseBuf: %p", pmem_data_buf);
+    buf_addr = (OMX_U8 *)pmem_data_buf;
+  }
+  else
+  {
+    DEBUG_PRINT_LOW("\n Shared PMEM addr for i/p PMEM UseBuf/AllocateBuf: %p", bufhdr->pBuffer);
+    buf_addr = (unsigned char *)mmap(NULL,
+          ((encoder_media_buffer_type *)bufhdr->pBuffer)->meta_handle->data[2],
+          PROT_READ|PROT_WRITE, MAP_SHARED,
+          ((encoder_media_buffer_type *)bufhdr->pBuffer)->meta_handle->data[0], 0);
+  }
+
+  if(inputBufferFile1)
+  {
+    fwrite((const char *)buf_addr, y_size, 1,inputBufferFile1);
+    fwrite((const char *)(buf_addr + c_offset), (y_size>>1), 1,inputBufferFile1);
+  }
+
+  munmap (buf_addr, ((encoder_media_buffer_type *)bufhdr->pBuffer)->meta_handle->data[2]);
+#else
+  if(inputBufferFile1)
+  {
+    fwrite((const char *)frameinfo.ptrbuffer, frameinfo.len, 1,inputBufferFile1);
+  }
+#endif
+
 
   int y_size = 0;
   int c_offset = 0;
@@ -1738,6 +1945,65 @@ bool venc_dev::venc_set_extradata(OMX_U32 extra_data)
   return true;
 }
 
+bool venc_dev::venc_set_slice_delivery_mode(OMX_BOOL enable)
+{
+  venc_ioctl_msg ioctl_msg = {NULL,NULL};
+  DEBUG_PRINT_HIGH("Set slice_delivery_mode: %d", enable);
+  if(multislice.mslice_mode == VEN_MSLICE_CNT_MB)
+  {
+    if(ioctl(m_nDriver_fd, VEN_IOCTL_SET_SLICE_DELIVERY_MODE) < 0)
+    {
+      DEBUG_PRINT_ERROR("Request for setting slice delivery mode failed");
+      return false;
+    }
+  }
+  else
+  {
+    DEBUG_PRINT_ERROR("WARNING: slice_mode[%d] is not VEN_MSLICE_CNT_MB to set "
+       "slice delivery mode to the driver.", multislice.mslice_mode);
+  }
+  return true;
+}
+
+bool venc_dev::venc_set_inband_video_header(OMX_BOOL enable)
+{
+  venc_ioctl_msg ioctl_msg = {(void *)&enable, NULL};
+  DEBUG_PRINT_HIGH("Set inband sps/pps: %d", enable);
+  if(ioctl(m_nDriver_fd, VEN_IOCTL_SET_SPS_PPS_FOR_IDR, (void *)&ioctl_msg) < 0)
+  {
+    DEBUG_PRINT_ERROR("Request for inband sps/pps failed");
+    return false;
+  }
+  return true;
+}
+
+bool venc_dev::venc_set_bitstream_restrict_in_vui(OMX_BOOL enable)
+{
+  /*venc_ioctl_msg ioctl_msg = {NULL, NULL};
+  DEBUG_PRINT_HIGH("Set bistream_restrict in vui: %d", enable);
+  if(ioctl(m_nDriver_fd, VEN_IOCTL_SET_VUI_BITSTREAM_RESTRICT_FLAG, (void *)&ioctl_msg) < 0)
+  {
+    DEBUG_PRINT_ERROR("Request for setting bitstream_restrict flag in VUI failed");*/
+    return false;
+  //}
+  return true;
+}
+
+bool venc_dev::venc_set_extradata(OMX_U32 extra_data)
+{
+  venc_ioctl_msg ioctl_msg = {NULL,NULL};
+  DEBUG_PRINT_HIGH("venc_set_extradata:: %x", extra_data);
+  ioctl_msg.in = (void*)&extra_data;
+  ioctl_msg.out = NULL;
+  if(ioctl (m_nDriver_fd, VEN_IOCTL_SET_EXTRADATA, (void*)&ioctl_msg) < 0)
+  {
+    DEBUG_PRINT_ERROR("ERROR: Request for setting extradata failed");
+    return false;
+  }
+
+  return true;
+}
+
 bool venc_dev::venc_set_session_qp(OMX_U32 i_frame_qp, OMX_U32 p_frame_qp)
 {
   venc_ioctl_msg ioctl_msg = {NULL,NULL};
@@ -1758,6 +2024,30 @@ bool venc_dev::venc_set_session_qp(OMX_U32 i_frame_qp, OMX_U32 p_frame_qp)
 
   session_qp.iframeqp = i_frame_qp;
   session_qp.pframqp = p_frame_qp;
+
+  return true;
+}
+
+bool venc_dev::venc_set_qp_range(OMX_U32 min_qp, OMX_U32 max_qp)
+{
+  venc_ioctl_msg ioctl_msg = {NULL,NULL};
+  struct venc_qprange qp = {0, 0};
+  DEBUG_PRINT_LOW("venc_set_qp_range:: min_qp = %d, max_qp = %d", min_qp,
+    max_qp);
+
+  qp.minqp = min_qp;
+  qp.maxqp = max_qp;
+
+  ioctl_msg.in = (void*)&qp;
+  ioctl_msg.out = NULL;
+  if(ioctl (m_nDriver_fd,VEN_IOCTL_SET_QP_RANGE,(void*)&ioctl_msg)< 0)
+  {
+    DEBUG_PRINT_ERROR("\nERROR: Request for setting qp range failed");
+    return false;
+  }
+
+  qp_range.minqp= min_qp;
+  qp_range.maxqp= max_qp;
 
   return true;
 }
@@ -2190,6 +2480,31 @@ bool venc_dev::venc_set_intra_refresh(OMX_VIDEO_INTRAREFRESHTYPE ir_mode, OMX_U3
     return false;
   }
 
+bool venc_dev::venc_set_intra_refresh(OMX_VIDEO_INTRAREFRESHTYPE ir_mode, OMX_U32 irMBs)
+{
+ venc_ioctl_msg ioctl_msg = {NULL, NULL};
+  bool status = true;
+  struct venc_intrarefresh intraRefresh_cfg;
+
+  // There is no disabled mode.  Disabled mode is indicated by a 0 count.
+  if (irMBs == 0 || ir_mode == OMX_VIDEO_IntraRefreshMax)
+  {
+    intraRefresh_cfg.irmode = VEN_IR_OFF;
+    intraRefresh_cfg.mbcount = 0;
+  }
+  else if ((ir_mode == OMX_VIDEO_IntraRefreshCyclic) &&
+           (irMBs < ((m_sVenc_cfg.input_width * m_sVenc_cfg.input_height)>>8)))
+  {
+    intraRefresh_cfg.irmode = VEN_IR_CYCLIC;
+    intraRefresh_cfg.mbcount = irMBs;
+  }
+  else
+  {
+    DEBUG_PRINT_ERROR("\nERROR: Invalid IntraRefresh Parameters:"
+                      "mb count: %d, mb mode:%d", irMBs, ir_mode);
+    return false;
+  }
+
   ioctl_msg.in = (void*)&intraRefresh_cfg;
   ioctl_msg.out = NULL;
   if(ioctl (m_nDriver_fd,VEN_IOCTL_SET_INTRA_REFRESH,(void*)&ioctl_msg) < 0)
@@ -2256,6 +2571,17 @@ bool venc_dev::venc_set_error_resilience(OMX_VIDEO_PARAM_ERRORCORRECTIONTYPE* er
         }
    DEBUG_PRINT_LOW("\n %s(): mode = %u, size = %u", __func__, multislice_cfg.mslice_mode,
                    multislice_cfg.mslice_size);
+#ifdef MAX_RES_1080P
+    if ((multislice_cfg.mslice_mode == VEN_MSLICE_CNT_BYTE) &&
+        (multislice_cfg.mslice_size < MIN_SLICE_BITS_1080P))
+    {
+       DEBUG_PRINT_ERROR("WARN: Slice size (%d bits) less than %d bits "\
+          "not supported, so disabling slice mode",
+          multislice_cfg.mslice_size, (int)MIN_SLICE_BITS_1080P);
+       multislice_cfg.mslice_mode = VEN_MSLICE_OFF;
+       multislice_cfg.mslice_size = 0;
+    }
+#endif
    ioctl_msg.in = (void*)&multislice_cfg;
    ioctl_msg.out = NULL;
    if (ioctl (m_nDriver_fd,VEN_IOCTL_SET_MULTI_SLICE_CFG,(void*)&ioctl_msg) < 0) {
@@ -2338,6 +2664,9 @@ bool venc_dev::venc_set_encode_framerate(OMX_U32 encode_framerate, OMX_U32 confi
 
   Q16ToFraction(encode_framerate,frame_rate_cfg.fps_numerator,frame_rate_cfg.fps_denominator);
 
+
+  Q16ToFraction(encode_framerate,frame_rate_cfg.fps_numerator,frame_rate_cfg.fps_denominator);
+
   DEBUG_PRINT_LOW("\n venc_set_encode_framerate: framerate(Q16) = %u,NR: %d, DR: %d",
                   encode_framerate,frame_rate_cfg.fps_numerator,frame_rate_cfg.fps_denominator);
 
@@ -2375,12 +2704,28 @@ bool venc_dev::venc_set_color_format(OMX_COLOR_FORMATTYPE color_format)
 #else
     m_sVenc_cfg.inputformat = VEN_INPUTFMT_NV12;
 #endif
+  if(color_format == OMX_COLOR_FormatYUV420SemiPlanar ||
+      color_format == QOMX_COLOR_FORMATYUV420PackedSemiPlanar32m) {
+#ifdef MAX_RES_1080P
+  m_sVenc_cfg.inputformat= VEN_INPUTFMT_NV12_16M2KA;
+    DEBUG_PRINT_HIGH("venc_set_color_format: VEN_INPUTFMT_NV12_16M2KA");
+#else
+    m_sVenc_cfg.inputformat = VEN_INPUTFMT_NV12;
+#endif
   }
+#ifdef MAX_RES_1080P
+  else if(color_format == QOMX_COLOR_FormatYUV420PackedSemiPlanar16m2ka_nv21)
+  {
+    m_sVenc_cfg.inputformat= VEN_INPUTFMT_NV21_16M2KA;
+    DEBUG_PRINT_HIGH("venc_set_color_format: VEN_INPUTFMT_NV21_16M2KA");
+  }
+#endif
   else
   {
     DEBUG_PRINT_ERROR("\nWARNING: Unsupported Color format [%d]", color_format);
 #ifdef MAX_RES_1080P
     m_sVenc_cfg.inputformat= VEN_INPUTFMT_NV12_16M2KA;
+    DEBUG_PRINT_HIGH("venc_set_color_format: VEN_INPUTFMT_NV12_16M2KA");
 #else
     m_sVenc_cfg.inputformat = VEN_INPUTFMT_NV12;
 #endif
@@ -2921,3 +3266,10 @@ bool venc_dev::venc_set_meta_mode(bool mode)
   return true;
 }
 #endif
+
+bool venc_dev::venc_get_uncache_flag()
+{
+  DEBUG_PRINT_LOW("%s: m_use_uncache_buffers = %d", __func__,
+     m_use_uncache_buffers);
+  return m_use_uncache_buffers;
+}

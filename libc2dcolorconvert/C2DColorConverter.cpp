@@ -48,6 +48,9 @@ Copyright (c) 2012 The Linux Foundation. All rights reserved.
 #define ALIGN128 128
 #define ALIGN32 32
 #define ALIGN16 16
+#define PADDING_720P 32
+#define WIDTH_720P 1280
+#define HEIGHT_720P 720
 
 //-----------------------------------------------------
 namespace android {
@@ -75,6 +78,7 @@ private:
     virtual bool unmapGPUAddr(uint32_t gAddr);
     virtual size_t calcLumaAlign(ColorConvertFormat format);
     virtual size_t calcSizeAlign(ColorConvertFormat format);
+    virtual bool isTarget8930(void);
 
     void *mC2DLibHandle;
     LINK_c2dCreateSurface mC2DCreateSurface;
@@ -87,6 +91,9 @@ private:
     LINK_c2dDestroySurface mC2DDestroySurface;
 
     int32_t mKgslFd;
+    LINK_c2dMapAddr mC2DMapAddr;
+    LINK_c2dUnMapAddr mC2DUnMapAddr;
+
     uint32_t mSrcSurface, mDstSurface;
     void * mSrcSurfaceDef;
     void * mDstSurfaceDef;
@@ -128,6 +135,12 @@ C2DColorConverter::C2DColorConverter(size_t srcWidth, size_t srcHeight, size_t d
      if (!mC2DCreateSurface || !mC2DUpdateSurface || !mC2DReadSurface
         || !mC2DDraw || !mC2DFlush || !mC2DFinish || !mC2DWaitTimestamp
         || !mC2DDestroySurface) {
+     mC2DMapAddr = (LINK_c2dMapAddr)dlsym(mC2DLibHandle, "c2dMapAddr");
+     mC2DUnMapAddr = (LINK_c2dUnMapAddr)dlsym(mC2DLibHandle, "c2dUnMapAddr");
+
+     if (!mC2DCreateSurface || !mC2DUpdateSurface || !mC2DReadSurface
+        || !mC2DDraw || !mC2DFlush || !mC2DFinish || !mC2DWaitTimestamp
+        || !mC2DDestroySurface || !mC2DMapAddr || !mC2DUnMapAddr) {
          ALOGE("%s: dlsym ERROR", __FUNCTION__);
          mError = -1;
          return;
@@ -399,6 +412,11 @@ size_t C2DColorConverter::calcStride(ColorConvertFormat format, size_t width)
             return ALIGN(width, ALIGN32) * 2; // RGB565 has width as twice
         case RGBA8888:
             return ALIGN(width, ALIGN32) * 4;
+            if (isTarget8930() && mSrcWidth == WIDTH_720P && mSrcHeight == HEIGHT_720P) {
+             return ALIGN((width + PADDING_720P), ALIGN32) * 4;
+            } else {
+             return ALIGN(width, ALIGN32) * 4;
+            }
         case YCbCr420Tile:
             return ALIGN(width, ALIGN128);
         case YCbCr420SP:
@@ -498,6 +516,20 @@ void * C2DColorConverter::getMappedGPUAddr(int bufFD, void *bufPtr, size_t bufLe
     }
     ALOGE("mapping failed w/ errno %s", strerror(errno));
     return NULL;
+    C2D_STATUS status;
+    void *gpuaddr = NULL;
+
+    status = mC2DMapAddr(bufFD, bufPtr, bufLen, 0, KGSL_USER_MEM_TYPE_ION,
+            &gpuaddr);
+    if (status != C2D_STATUS_OK) {
+        ALOGE("c2dMapAddr failed: status %d fd %d ptr %p len %d flags %d\n",
+                status, bufFD, bufPtr, bufLen, KGSL_USER_MEM_TYPE_ION);
+        return NULL;
+    }
+    ALOGV("c2d mapping created: gpuaddr %p fd %d ptr %p len %d\n",
+            gpuaddr, bufFD, bufPtr, bufLen);
+
+    return gpuaddr;
 }
 
 bool C2DColorConverter::unmapGPUAddr(uint32_t gAddr)
@@ -514,6 +546,13 @@ bool C2DColorConverter::unmapGPUAddr(uint32_t gAddr)
      return false;
    }
    return true;
+
+    C2D_STATUS status = mC2DUnMapAddr((void*)gAddr);
+
+    if (status != C2D_STATUS_OK)
+        ALOGE("c2dUnMapAddr failed: status %d gpuaddr %08x\n", status, gAddr);
+
+    return (status == C2D_STATUS_OK);
 }
 
 int32_t C2DColorConverter::getBuffReq(int32_t port, C2DBuffReq *req) {
@@ -666,7 +705,30 @@ int32_t C2DColorConverter::dumpOutput(char * filename, char mode) {
     close(fd);
     return ret < 0 ? ret : 0;
 }
-
+bool C2DColorConverter::isTarget8930(void) {
+    int fd;
+    if ((fd = open("/sys/devices/system/soc/soc0/id", O_RDONLY)) != -1) {
+        char raw_buf[5];
+        int soc;
+        if (read(fd, raw_buf,4) == -1) {
+             close(fd);
+             return false;
+        } else {
+            raw_buf[4] = 0;
+            soc = atoi(raw_buf);
+            close(fd);
+            if (/* MSM_CPU_8930 */
+                soc == 116 || soc == 117 || soc == 118 || soc == 119 || soc == 179 ||
+                /* MSM_CPU_8930AA */
+                soc == 142 || soc == 143 || soc == 144 || soc == 160 || soc == 180 ||
+                /* MSM_CPU_8930AB */
+                soc == 154 || soc == 155 || soc == 156 || soc == 157 || soc == 181) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
 extern "C" C2DColorConverterBase* createC2DColorConverter(size_t srcWidth, size_t srcHeight, size_t dstWidth, size_t dstHeight, ColorConvertFormat srcFormat, ColorConvertFormat dstFormat, int32_t flags)
 {
     return new C2DColorConverter(srcWidth, srcHeight, dstWidth, dstHeight, srcFormat, dstFormat, flags);
